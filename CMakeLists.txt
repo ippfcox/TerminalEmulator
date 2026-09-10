@@ -7,6 +7,10 @@ set(CMAKE_CXX_STANDARD 20)
 find_program(MESON_EXECUTABLE meson REQUIRED)
 set(LIBTSM_SRC_DIR ${CMAKE_SOURCE_DIR}/3rdparty/libtsm)
 set(LIBTSM_BUILD_DIR ${CMAKE_BINARY_DIR}/libtsm-build/meson-build)
+set(LV_BUILD_CONF_PATH ${CMAKE_SOURCE_DIR}/config/lv_conf.h CACHE PATH "" FORCE)
+set(CONFIG_LV_BUILD_DEMOS OFF CACHE BOOL "" FORCE)
+set(CONFIG_LV_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(CONFIG_LV_USE_THORVG_INTERNAL OFF CACHE BOOL "" FORCE)
 
 add_library(libtsm-imported SHARED IMPORTED)
 set_target_properties(libtsm-imported
@@ -15,7 +19,7 @@ set_target_properties(libtsm-imported
     INTERFACE_INCLUDE_DIRECTORIES ${LIBTSM_SRC_DIR}/src/tsm;${LIBTSM_SRC_DIR}/src/shared;${LIBTSM_SRC_DIR}/external)
 
 add_subdirectory(src)
-# add_subdirectory(${CMAKE_SOURCE_DIR}/3rdparty/lvgl)
+add_subdirectory(${CMAKE_SOURCE_DIR}/3rdparty/lvgl)
 add_subdirectory(${CMAKE_SOURCE_DIR}/3rdparty/spdlog)
 
 include(ExternalProject)

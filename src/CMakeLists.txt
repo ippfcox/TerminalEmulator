@@ -21,6 +21,7 @@ target_link_directories(${TARGET}
 target_link_libraries(${TARGET}
     PRIVATE
     spdlog::spdlog
+    lvgl::lvgl
     libtsm-imported
     util
 )
