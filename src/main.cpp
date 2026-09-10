@@ -1,9 +1,12 @@
 #include <spdlog/spdlog.h>
-#include "libtsm.h"
+// #include "libtsm.h"
 
 int main()
 {
-    SPDLOG_INFO("hello");
+    // tsm_screen *screen{nullptr};
+    // int ret = tsm_screen_new(&screen, );
+    // tsm_vte *
+    //     vte{nullptr};
 
     return 0;
 }
