@@ -5,6 +5,8 @@ set(TARGET TerminalEmulator)
 
 list(APPEND SRCS
     main.cpp
+    pty_process.cpp
+    lv_term.cpp
 )
 
 add_executable(${TARGET} ${SRCS})

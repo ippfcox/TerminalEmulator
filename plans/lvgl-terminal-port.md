@@ -234,3 +234,136 @@ int main() {
 | 字体 | `lv_font_ttf` | `3rdparty/lvgl/src/font/` |
 | 事件 | `lv_event_send` / `LV_EVENT_*` | `3rdparty/lvgl/src/misc/lv_event.c` |
 | 重绘 | `lv_obj_invalidate` + `lv_refr` | `3rdparty/lvgl/src/core/lv_refr.c` |
+
+## 8. `lv_term` 最小骨架（当前迭代实现范围）
+
+> 目标：先跑通"能显示 shell 提示符、能打字"，不追求 glyph cache、鼠标选择做最小版。对应 todo #7。
+
+### 8.1 文件布局
+
+```
+src/terminal/
+├── lv_term.h      // widget 创建/配置 API + term_data 结构体
+└── lv_term.cpp    // 实现：canvas draw 回调、vte 回调、Pty 接线
+```
+
+### 8.2 `lv_term.h`
+
+```cpp
+#pragma once
+#include <lvgl.h>
+#include <libtsm.h>
+#include "../pty_process.h"
+
+/**
+ * 终端 widget 私有数据（挂在 lv_obj 的 user_data 上）
+ * 对应 GTK 版 GtkTsmTerminalPrivate（gtktsm-terminal.c:1091）
+ */
+struct term_data {
+    struct tsm_screen *screen;
+    struct tsm_vte *vte;
+    te::Pty pty;
+    lv_obj_t *canvas;        // 挂 lv_term 下的 lv_canvas 子对象
+    lv_font_t *font;        // lv_font_ttf 加载
+    int cols, rows;         // 当前列/行
+};
+
+// ---- 公共 API ----
+lv_obj_t *lv_term_create(lv_obj_t *parent);           // 创建 widget + canvas + screen + vte
+void lv_term_set_font(lv_obj_t *term, const char *ttf_path);
+void lv_term_set_size(lv_obj_t *term, int cols, int rows);
+void lv_term_feed_input(lv_obj_t *term, const char *data, size_t len);
+void lv_term_handle_key(lv_obj_t *term, uint32_t keysym, uint32_t ascii,
+                         unsigned int mods, uint32_t unicode);
+void lv_term_handle_mouse(lv_obj_t *term, unsigned int cell_x, unsigned int cell_y,
+                           unsigned int pixel_x, unsigned int pixel_y,
+                           unsigned int button, unsigned int event, unsigned char flags);
+term_data *term_get_data(lv_obj_t *term);
+```
+
+### 8.3 `lv_term.cpp` 最小实现
+
+```cpp
+#include "lv_term.h"
+#include <shl-pty.h>
+
+// ---- vte -> pty 写回（对应 GTK 版 terminal_write_fn，gtktsm-terminal.c:1526）----
+static void term_vte_write_cb(struct tsm_vte *vte, const char *u8, size_t len, void *data)
+{
+    term_data *d = term_get_data((lv_obj_t *)data);
+    std::vector<std::byte> bytes(reinterpret_cast<const std::byte*>(u8),
+                                  reinterpret_cast<const std::byte*>(u8) + len);
+    d->pty.write(bytes);   // 写回子进程（src/pty_process.h:26）
+}
+
+// ---- canvas 重绘回调（对应 GTK 版 renderer_draw_cell，gtktsm-terminal.c:939）----
+static int term_draw_cell(struct tsm_screen *con, uint64_t id, const uint32_t *ch,
+                           size_t len, unsigned int width, unsigned int posx, unsigned int posy,
+                           const struct tsm_screen_attr *attr, tsm_age_t age, void *data)
+{
+    lv_obj_t *term = (lv_obj_t *)data;
+    term_data *d = term_get_data(term);
+    lv_obj_t *canvas = d->canvas;
+    int cell_w = lv_obj_get_width(term) / d->cols;
+    int cell_h = lv_obj_get_height(term) / d->rows;
+
+    lv_color_t fg = attr->inverse ? lv_color_make(attr->br, attr->bg, attr->bb)
+                                    : lv_color_make(attr->fr, attr->fg, attr->fb);
+    lv_color_t bg = attr->inverse ? lv_color_make(attr->fr, attr->fg, attr->fb)
+                                    : lv_color_make(attr->br, attr->bg, attr->bb);
+
+    lv_canvas_fill(canvas, bg);
+    lv_canvas_set_font(canvas, d->font);
+    lv_canvas_text(canvas, cell_w * posx, cell_h * posy, d->font, fg, 0, ch, len);
+    if (attr->underline)
+        lv_canvas_line(canvas, cell_w * posx, cell_h * (posy + 1) - 2,
+                       cell_w * (posx + 1), cell_h * (posy + 1) - 2, fg, 1);
+    return 0;
+}
+
+// ---- 创建（对应 GTK 版 terminal_configure_fn 的角色，gtktsm-terminal.c:1249）----
+lv_obj_t *lv_term_create(lv_obj_t *parent)
+{
+    lv_obj_t *term = lv_obj_create(parent);
+    lv_obj_set_size(term, 80 * 8, 24 * 16);
+
+    term_data *d = (term_data *)calloc(1, sizeof(*d));
+    lv_obj_set_user_data(term, d);
+
+    tsm_screen_new(&d->screen, nullptr, nullptr);
+    tsm_screen_set_max_sb(d->screen, 2000);
+
+    tsm_vte_new(&d->vte, d->screen, term_vte_write_cb, term, nullptr, nullptr);
+    d->cols = 80; d->rows = 24;
+    tsm_screen_resize(d->screen, d->cols, d->rows);
+
+    d->canvas = lv_canvas_create(term);
+    lv_obj_set_size(d->canvas, lv_obj_get_width(term), lv_obj_get_height(term));
+    lv_obj_add_flag(d->canvas, LV_OBJ_FLAG_FLOATING);
+
+    // 屏幕变更时重绘：用 lv_timer 周期调 tsm_screen_draw(d->screen, term_draw_cell, term)
+    lv_timer_create(term_idle_redraw, 5, term);
+
+    return term;
+}
+```
+
+### 8.4 数据流接线（谁调谁）
+
+| 数据流 | 调用链 |
+|---|---|
+| 键盘输入 | `lv_indev`(keypad) 的 `read_cb` → `lv_term_handle_key` → `tsm_vte_handle_keyboard`（`libtsm.h:574`） |
+| PTY 读 → 屏幕 | `Pty::dispatch`（`pty_process.h:25`）→ `tsm_vte_input`（`libtsm.h:560`）→ screen 更新 → `lv_obj_invalidate(canvas)` |
+| 屏幕 → 画布 | `tsm_screen_draw`（`libtsm.h:304`）+ `term_draw_cell` 回调 → `lv_canvas` 重绘 |
+| 输出写回 | `tsm_vte` 的 write_cb（`libtsm.h:447`）→ `Pty::write`（`pty_process.h:26`）写 pty fd |
+| resize | `LV_EVENT_RESIZED` → `tsm_screen_resize`（`libtsm.h:228`）+ `Pty::resize`（`pty_process.h:28`）+ `lv_obj_set_size(canvas)` |
+
+### 8.5 实现注意项
+
+- **cell 尺寸**：用 `lv_font_get_metrics` 读字体行高/字宽，不要硬编码 8x16。
+- **字体**：项目里放一个等宽 TTF（如 `DejaVuSansMono.ttf`），用 `lv_font_ttf` 加载；需 `lv_conf.h` 里 `LV_USE_TTF 1`。
+- **主循环**：`lv_timer_create(term_idle_fn, 5, term)`，`term_idle_fn` 里调 `d->pty.dispatch()`，`dispatch` 读到 pty 数据后调 `tsm_vte_input` + `lv_obj_invalidate`。
+- **键盘映射**：`lv_indev` 键盘 `read_cb` 拿到的是 `lv_key_t`（ASCII），非 xkbcommon keysym；简单键直接映射，组合键（Ctrl/Alt）在 read_cb 里自己组 `mods` 再调 `tsm_vte_handle_keyboard`。
+- **`Pty::write` 签名**：`int write(std::vector<std::byte> data)`（`pty_process.h:26`），注意参数是 `std::vector<std::byte>` 而非 `shl_pty_write` 的裸指针，`term_vte_write_cb` 里需做转换。
+- **`Pty::open` 的 InputFunc**：签名是 `void(std::shared_ptr<Pty>, std::any opaque, std::vector<std::byte> data)`（`pty_process.h:15`），main.cpp 里传入的回调应把 `data` 转为 `char*` 后调 `tsm_vte_input`（补上 `src/pty_process.cpp:235` 的 TODO）。
+- **X11 平台窗口**：`lv_conf.h:1282` 已开 `LV_USE_X11 1`，main.cpp 里用 `lv_x11_window_create(title, w, h)` 创建真实窗口 + `lv_x11_inputs_create(disp, nullptr)` 创建键盘/鼠标，主循环调 `lv_timer_handler()`（替代原 `lv_display_create` + `lv_tick_inc` 的空转）。系统需装 `libx11-dev` / `libx11-xcb-dev`。
