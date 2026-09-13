@@ -29,5 +29,6 @@ ExternalProject_Add(libtsm
     CONFIGURE_COMMAND ${MESON_EXECUTABLE} setup --buildtype=release ${LIBTSM_SRC_DIR} ${LIBTSM_BUILD_DIR} -Dtests=false
     BUILD_COMMAND ${MESON_EXECUTABLE} compile -C ${LIBTSM_BUILD_DIR}
     INSTALL_COMMAND ""
+    BUILD_BYPRODUCTS ${LIBTSM_BUILD_DIR}/src/tsm/libtsm.so
     BUILD_ALWAYS TRUE)
 add_dependencies(TerminalEmulator libtsm)
